@@ -18,10 +18,19 @@ RUN pip install --no-cache-dir ".[space]" \
 # Pre-install the competition's required heavy deps (CPU torch + nnsight) so
 # participant notebooks inherit them via the per-job venv (--system-site-packages)
 # instead of reinstalling ~1GB per job. Heavy compute still runs remotely on NDIF.
-# transformers is pinned to a release: nnsight resolves the model architecture
-# locally on meta before tracing, so the version must recognise the traced models.
-# 5.12.1 recognises Nemotron-3-Super-120B / Qwen3.5-27B / gemma-3-27b-it (verified
-# via `--dry`). NOTE: the soft-trigger LoRA-on-sharded-120B failure was NOT a
+# transformers/nnsight/torch are pinned to EXACTLY the versions NDIF is deployed on:
+# nnsight resolves each model's architecture locally (on meta) and serializes the
+# intervention graph, so a client/worker skew makes the worker reject the trace
+# (e.g. `Unknown persistent id: Module:model.model.visual` / `...embed_tokens`, or
+# `Module nnsight.intervention.backends.remote is not whitelisted`). Pinned to the
+# deploy of 2026-07-22 (verified: all 5 competition models trace via plain
+# `LanguageModel(...)` — see fargate/verify_models.py): transformers 5.15.0.dev0
+# @c7f9c88 (registers Qwen3.5 as its multimodal class — the release 5.12.x loaded it
+# as CausalLM and no longer matches the deploy), nnsight hackathon/peft @d901da3e
+# ("load multimodal repos as their registered class"), torch 2.13.0. When you
+# redeploy NDIF, re-pin all three here to match and re-run verify_models.py from the
+# built image before opening submissions.
+# NOTE: the soft-trigger LoRA-on-sharded-120B failure was NOT a
 # transformers issue and NOT fixed by transformers main (main's WeightConverter also
 # lacks the kwarg) — it's peft: keep the NDIF *workers* on peft<0.19 (peft 0.19.x
 # calls transformers' WeightConverter with a distributed_operation kwarg no
@@ -38,9 +47,11 @@ RUN pip install --no-cache-dir ".[space]" \
 # (nnsight._c.py_mount) from source, so it needs gcc + headers (build-essential).
 RUN apt-get update && apt-get install -y --no-install-recommends git build-essential \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch torchvision \
-    && pip install --no-cache-dir "transformers==5.12.1" "peft<0.19" \
-       "nnsight @ git+https://github.com/ndif-team/nnsight.git@e4f37fa3e7c6bb936b4a37e2b5402dca2330610c"
+    && pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.13.0 torchvision==0.28.0 \
+    && pip install --no-cache-dir \
+       "transformers @ git+https://github.com/huggingface/transformers.git@c7f9c8815610d27e41a6b0b0cc9e2d3c49468d1d" \
+       "peft<0.19" \
+       "nnsight @ git+https://github.com/ndif-team/nnsight.git@d901da3ed772c815d0d146136de6f7e35f913221"
 
 # RESULTS_URI is left unset so runner.yaml's bucket:// results store is used.
 # (Set RESULTS_URI=/data/results.jsonl + attach a volume to use local storage instead.)

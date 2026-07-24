@@ -26,9 +26,11 @@ RUN pip install --no-cache-dir ".[space]" boto3 \
 
 ARG INSTALL_HEAVY=0
 RUN if [ "$INSTALL_HEAVY" = "1" ]; then \
-      pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch torchvision \
-      && pip install --no-cache-dir "transformers==5.12.1" "peft<0.19" \
-         "nnsight @ git+https://github.com/ndif-team/nnsight.git@e4f37fa3e7c6bb936b4a37e2b5402dca2330610c" ; \
+      pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.13.0 torchvision==0.28.0 \
+      && pip install --no-cache-dir \
+         "transformers @ git+https://github.com/huggingface/transformers.git@c7f9c8815610d27e41a6b0b0cc9e2d3c49468d1d" \
+         "peft<0.19" \
+         "nnsight @ git+https://github.com/ndif-team/nnsight.git@d901da3ed772c815d0d146136de6f7e35f913221" ; \
     fi
 
 # Baked eval data (built by build_image.py): the inputs arrow cache + lora configs
