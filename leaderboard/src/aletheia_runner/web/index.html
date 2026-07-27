@@ -297,6 +297,13 @@
       color: var(--muted); padding: 20px; }
     .me-empty code { font-style: normal; font-family: var(--serif); color: var(--ink); }
     .me-error { color: var(--accent); }
+    .me-subs-bar { text-align: right; margin: 4px 0 -6px; }
+    .me-toggle { font-family: var(--serif); font-size: 10px; letter-spacing: 0.12em;
+      text-transform: uppercase; color: var(--faint); background: none; border: none;
+      cursor: pointer; padding: 2px 2px; }
+    .me-toggle:hover { color: var(--ink); }
+    .attempts { font-size: 10px; letter-spacing: 0.04em; color: var(--faint);
+      font-style: italic; margin-left: 8px; }
 
     a { color: var(--accent); text-decoration: none; }
 
@@ -596,6 +603,39 @@
 
     // ── Entrant's desk: look up your own standing by NDIF key ──
     let meKey = null;
+    let meShowAll = false;   // desk: collapse to best-per-notebook, or show every attempt
+    let meData = null;       // last /api/me payload, for re-render on toggle
+
+    // Collapse a flat submission history to one row per notebook: its best scored
+    // attempt, or (if none scored) its most recent failure. Declutters teams that
+    // resubmit the same notebook many times.
+    function collapseSubs(subs) {
+      const groups = new Map();
+      for (const s of subs) {
+        if (!groups.has(s.notebook)) groups.set(s.notebook, []);
+        groups.get(s.notebook).push(s);
+      }
+      const bacc = (x) => (x.metrics && x.metrics.balanced_accuracy) || 0;
+      const reps = [];
+      for (const arr of groups.values()) {
+        const oks = arr.filter((x) => x.ok);
+        const rep = oks.length
+          ? oks.reduce((a, b) => (bacc(b) > bacc(a) ? b : a))
+          : arr.reduce((a, b) => ((b.submitted_at || "") > (a.submitted_at || "") ? b : a));
+        reps.push(Object.assign({}, rep, { _attempts: arr.length }));
+      }
+      reps.sort((a, b) => {
+        if (a.ok !== b.ok) return a.ok ? -1 : 1;          // scored first
+        if (a.ok) return bacc(b) - bacc(a);               // then by score
+        return (b.submitted_at || "").localeCompare(a.submitted_at || "");
+      });
+      return reps;
+    }
+
+    function toggleMeAll() {
+      meShowAll = !meShowAll;
+      if (meData) renderMe(meData);
+    }
 
     function toggleMe(i) {
       const r = document.querySelector('tr.me-row[data-mi="' + i + '"]');
@@ -630,19 +670,28 @@
           + (rl.window_hours ? ` &middot; ${rl.window_hours}h window` : "")
           + (resetIn ? ` &middot; resets in ${esc(resetIn)}` : "");
       }
-      const pending = d.pending > 0
-        ? `<span class="pending">${d.pending} running</span>` : "";
-      const rows = (d.submissions || []).map((s, i) => {
+      const inf = d.in_flight;
+      const pending = inf
+        ? `<span class="pending">${esc(inf.status)}${inf.progress && inf.progress.index != null ? ` &middot; ${inf.progress.index}/${inf.progress.total}` : ""}</span>`
+        : "";
+      meData = d;
+      const allSubs = d.submissions || [];
+      const collapsed = collapseSubs(allSubs);
+      const list = meShowAll ? allSubs : collapsed;
+      const hasMore = allSubs.length > collapsed.length;
+      const attemptsBadge = (s) =>
+        (!meShowAll && s._attempts > 1) ? ` <span class="attempts">${s._attempts} attempts</span>` : "";
+      const rows = list.map((s, i) => {
         if (!s.ok) {
           const where = s.failed_dataset ? " on " + esc(dsName(s.failed_dataset)) : "";
           return `<tr>
-            <td>${esc(s.notebook)}${tagBadge(s.tag)}</td>
+            <td>${esc(s.notebook)}${tagBadge(s.tag)}${attemptsBadge(s)}</td>
             <td class="when">${esc(fmtTime(s.submitted_at))}</td>
             <td class="s-res" colspan="3"><span class="fail">failed${where}</span></td></tr>`;
         }
         const m = s.metrics || {};
         return `<tr class="me-row" data-mi="${i}" onclick="toggleMe(${i})">
-            <td>${esc(s.notebook)}${tagBadge(s.tag)}</td>
+            <td>${esc(s.notebook)}${tagBadge(s.tag)}${attemptsBadge(s)}</td>
             <td class="when">${esc(fmtTime(s.submitted_at))}</td>
             <td class="s-res run">${esc(fmtDur(s.runtime_seconds))}</td>
             <td class="s-res second">${fmt(m.auroc)}</td>
@@ -655,10 +704,14 @@
              <th class="s-res">AUROC</th><th class="s-res">Bal. Acc</th>
              </tr></thead><tbody>${rows}</tbody></table>`
         : '<div class="me-empty">No submissions yet.</div>';
+      const toggle = hasMore
+        ? `<div class="me-subs-bar"><button class="me-toggle" onclick="toggleMeAll()">${
+            meShowAll ? "Show best per notebook" : `Show all ${allSubs.length} attempts`}</button></div>`
+        : "";
       me.innerHTML = `<div class="me-head">
           <div class="me-team">${esc(d.team)}${pending}</div>
           <div class="me-rl">${rlText}</div>
-        </div>${body}`;
+        </div>${toggle}${body}`;
     }
 
     async function loadMe() {

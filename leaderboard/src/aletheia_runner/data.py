@@ -22,7 +22,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import SPLIT, RunnerConfig
+from .config import SPLIT, RunnerConfig, dataset_model_lora
 
 # Weight files we never predownload — nnsight loads on meta and the LoRA is applied
 # remotely on NDIF, so the sandbox only needs the adapter config, not the weights.
@@ -118,6 +118,18 @@ def prepare_inputs(config: RunnerConfig) -> DataLayout:
     # Predownload each adapter's CONFIG (never its weights).
     from huggingface_hub import snapshot_download
     for repo in sorted(loras):
+        snapshot_download(repo, cache_dir=str(hub_cache), token=config.hf_token,
+                          ignore_patterns=_WEIGHT_PATTERNS)
+
+    # Predownload each BASE MODEL's config + tokenizer (never its weights), so the
+    # sandbox builds the nnsight meta-model from this baked cache instead of a live
+    # Hub fetch. Without this, a notebook loads the base config at run time using the
+    # *submitter's* HF token — which fails for GATED repos (e.g. google/gemma-3-27b-it)
+    # whose license the submitter hasn't accepted. Weights are never needed locally
+    # (they live on the NDIF cluster); only the small config/tokenizer files.
+    bases = {m for cfg in config.datasets
+             if (m := dataset_model_lora(cfg.name)[0])}
+    for repo in sorted(bases):
         snapshot_download(repo, cache_dir=str(hub_cache), token=config.hf_token,
                           ignore_patterns=_WEIGHT_PATTERNS)
 

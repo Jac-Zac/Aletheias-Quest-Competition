@@ -320,6 +320,25 @@ class JobContext:
     common: dict
 
 
+# Packages baked into the base image that must not be reinstalled from a
+# submission's requirements.txt. nnsight ships as a git+github pin, which the
+# install egress allowlist (PyPI-only) rejects — a pin would fail the whole run.
+_PREINSTALLED_REQS = ("nnsight",)
+
+
+def _strip_preinstalled_reqs(text: str) -> str:
+    """Drop requirement lines referencing a pre-installed package (e.g. nnsight),
+    keeping comments and every other dependency so PyPI installs still work."""
+    kept = []
+    for line in text.splitlines():
+        s = line.strip().lower()
+        if s and not s.startswith("#") and any(p in s for p in _PREINSTALLED_REQS):
+            continue
+        kept.append(line)
+    out = "\n".join(kept)
+    return out + "\n" if text.endswith("\n") and out else out
+
+
 def setup_job(
     submission_root: Path,
     data_layout: DataLayout,
@@ -381,6 +400,12 @@ def setup_job(
 
     # 4. Install submission/requirements.txt once (sandboxed; egress limited to PyPI).
     req = work / "submission" / "requirements.txt"
+    if req.exists() and req.read_text().strip():
+        # nnsight (the hackathon build) is pre-installed in the base image. Strip any
+        # participant pin of it: installs come from git+github, which the install
+        # egress allowlist (PyPI-only) blocks — a pinned nnsight fails the whole
+        # submission on every dataset. Everything else still installs from PyPI.
+        req.write_text(_strip_preinstalled_reqs(req.read_text()))
     if req.exists() and req.read_text().strip():
         code, out = _run(
             [str(venv / "bin" / "python"), "-m", "pip", "install", "-r",

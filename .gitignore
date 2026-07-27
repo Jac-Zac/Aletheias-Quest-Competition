@@ -3,6 +3,7 @@ submission.csv
 
 # Local runner config + secrets (kept out of version control)
 leaderboard/runner.yaml
+leaderboard/runner-test.yaml
 leaderboard/admin_token.txt
 
 # Python

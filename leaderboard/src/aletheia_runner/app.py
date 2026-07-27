@@ -21,6 +21,7 @@ import sys
 import tempfile
 import threading
 import time
+import zipfile
 import uuid
 from pathlib import Path
 
@@ -41,7 +42,7 @@ MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "250"))
 # How many submissions may execute at once. Each run holds a model graph + a
 # notebook kernel locally (~1-2 GB; the heavy compute is remote on NDIF), so this
 # bounds RAM/CPU on a small Space. Extra submissions queue on the semaphore.
-MAX_CONCURRENT_SUBMISSIONS = int(os.environ.get("MAX_CONCURRENT_SUBMISSIONS", "2"))
+MAX_CONCURRENT_SUBMISSIONS = int(os.environ.get("MAX_CONCURRENT_SUBMISSIONS", "4"))
 # The leaderboard page polls /api/leaderboard every 30s per open tab, and each
 # read pulls the whole results object from the bucket. Cache the computed board
 # in-process for this long so N viewers cost ~one read per window, not N; a
@@ -88,6 +89,51 @@ def _read_json_uri(uri: str, token: str | None):
             return json.loads(local.read_text()) if local.exists() else None
     p = Path(uri)
     return json.loads(p.read_text()) if p.exists() else None
+
+
+def _read_text_uri(uri: str, token: str | None):
+    """Read raw text from a ``bucket://`` uri or local path; None if missing/unset."""
+    if not uri:
+        return None
+    if is_bucket_uri(uri):
+        from huggingface_hub import download_bucket_files
+        bucket_id, path = parse_bucket_uri(uri, "max_concurrent.txt")
+        with tempfile.TemporaryDirectory(prefix="aletheia-mc-") as tmp:
+            local = Path(tmp) / "f.txt"
+            download_bucket_files(bucket_id, files=[(path, str(local))],
+                                  raise_on_missing_files=False, token=token)
+            return local.read_text() if local.exists() else None
+    p = Path(uri)
+    return p.read_text() if p.exists() else None
+
+
+class _DynamicSlots:
+    """Async admission gate honoring a LIVE limit (read via ``limit_fn`` — must be
+    fast/non-blocking). At most ``limit`` holders run at once. A lowered limit never
+    preempts in-flight holders (it just stops admitting until running drops below it);
+    a raised limit admits more within one poll interval. Same ``async with`` interface
+    as asyncio.Semaphore, so call sites are unchanged."""
+    def __init__(self, limit_fn, poll: float = 0.5):
+        self._limit_fn = limit_fn
+        self._poll = poll
+        self._running = 0
+        self._lock = asyncio.Lock()
+
+    async def __aenter__(self):
+        while True:
+            async with self._lock:
+                if self._running < max(1, int(self._limit_fn())):
+                    self._running += 1
+                    return self
+            await asyncio.sleep(self._poll)
+
+    async def __aexit__(self, *exc):
+        async with self._lock:
+            self._running -= 1
+
+    @property
+    def running(self) -> int:
+        return self._running
 
 
 class _Invalidations:
@@ -213,7 +259,16 @@ def create_app(config: RunnerConfig, store: BaseResultStore,
     #   - submit_slots bounds concurrent heavy runs (the submission queue);
     #   - bucket_lock serializes read-modify-write of the registry + results
     #     objects so concurrent submissions can't clobber each other.
-    submit_slots = asyncio.Semaphore(MAX_CONCURRENT_SUBMISSIONS)
+    # Live-tunable concurrency: a background task refreshes `_conc["limit"]` from a
+    # bucket text file (a single integer) every ~15s, so an operator can change how
+    # many submissions run at once by editing that file — no redeploy. Falls back to
+    # MAX_CONCURRENT_SUBMISSIONS if the file is missing/unreadable.
+    _conc = {"limit": MAX_CONCURRENT_SUBMISSIONS}
+    max_conc_uri = ""
+    if is_bucket_uri(config.results_uri):
+        _bid, _ = parse_bucket_uri(config.results_uri, "results.jsonl")
+        max_conc_uri = f"bucket://{_bid}/max_concurrent.txt"
+    submit_slots = _DynamicSlots(lambda: _conc["limit"])
     bucket_lock = asyncio.Lock()
     lb_cache = _LeaderboardCache(store, LEADERBOARD_CACHE_TTL)
     # Disqualified submissions (read-only JSON, edited by hand). Default: a sibling
@@ -246,6 +301,26 @@ def create_app(config: RunnerConfig, store: BaseResultStore,
     # placeholder). None passes through.
     def label(key: str | None) -> str | None:
         return dataset_label(key) if key else key
+
+    _bg_tasks: list = []
+
+    @app.on_event("startup")
+    async def _start_bg():
+        async def _refresh_concurrency():
+            while True:
+                try:
+                    txt = await run_in_threadpool(_read_text_uri, max_conc_uri, config.hf_token)
+                    _conc["limit"] = max(1, int(txt.strip())) if txt and txt.strip() else \
+                        MAX_CONCURRENT_SUBMISSIONS
+                except Exception:  # noqa: BLE001 - a bad file must never wedge the gate
+                    pass
+                await asyncio.sleep(15)
+        _bg_tasks.append(asyncio.create_task(_refresh_concurrency()))
+
+    @app.on_event("shutdown")
+    async def _stop_bg():
+        for t in _bg_tasks:
+            t.cancel()
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
@@ -286,9 +361,13 @@ def create_app(config: RunnerConfig, store: BaseResultStore,
         rate_limit, submissions = await asyncio.gather(
             run_in_threadpool(limiter.status, team),
             run_in_threadpool(_team_submissions, store, team))
+        active = next((r for r in runs.values()
+                       if r["team"] == team and r.get("status") in ("queued", "running")), None)
         return {"registered": True, "team": team, "rate_limit": rate_limit,
                 "submissions": [_anonymize(s, label) for s in submissions],
-                "pending": pending.get(team, 0)}
+                "pending": pending.get(team, 0),
+                "in_flight": ({"status": active["status"],
+                               "progress": active.get("progress")} if active else None)}
 
     @app.get("/api/health")
     def health() -> dict:
@@ -297,7 +376,9 @@ def create_app(config: RunnerConfig, store: BaseResultStore,
         # cutover; it only reports the mode, exposes no config).
         return {"ok": True,
                 "backend": "fargate" if backend is not None else "in-process",
-                "datasets": list(config.dataset_label_map().values())}
+                "datasets": list(config.dataset_label_map().values()),
+                "max_concurrent": _conc["limit"],
+                "running": submit_slots.running}
 
     @app.get("/admin/runs")
     def admin_runs(x_admin_token: str | None = Header(default=None,
@@ -305,10 +386,20 @@ def create_app(config: RunnerConfig, store: BaseResultStore,
         """List in-flight runs (operator only). Requires ``X-Admin-Token`` matching
         the configured ``ADMIN_TOKEN``; disabled (404) when no token is set."""
         _require_admin(x_admin_token)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        def _age(iso):
+            try:
+                return round((now - datetime.datetime.fromisoformat(iso)).total_seconds())
+            except Exception:  # noqa: BLE001
+                return None
         return {"runs": [{"id": r["id"], "team": r["team"],
+                          "status": r.get("status"),
+                          "cancelled": r["canceller"].cancelled,
                           "started_at": r["started_at"],
-                          "cancelled": r["canceller"].cancelled}
-                         for r in runs.values()]}
+                          "dispatched_at": r.get("dispatched_at"),
+                          "age_s": _age(r["started_at"]),
+                          "progress": r.get("progress")}
+                         for r in sorted(runs.values(), key=lambda r: r["id"])]}
 
     @app.post("/admin/cancel")
     def admin_cancel(run_id: int | None = None, cancel_all: bool = False,
@@ -325,6 +416,18 @@ def create_app(config: RunnerConfig, store: BaseResultStore,
         for r in targets:
             r["canceller"].cancel()
         return {"cancelled": [r["id"] for r in targets]}
+
+    @app.post("/admin/purge")
+    def admin_purge(x_admin_token: str | None = Header(default=None,
+                                                       alias="X-Admin-Token")) -> dict:
+        """Drop tracking entries whose worker task has already finished (operator only).
+        Teardown normally removes these automatically; this clears any that lingered."""
+        _require_admin(x_admin_token)
+        purged = [rid for rid, r in list(runs.items())
+                  if r.get("task") is not None and r["task"].done()]
+        for rid in purged:
+            runs.pop(rid, None)
+        return {"purged": purged}
 
     @app.get("/api/sandbox-probe")
     def sandbox_probe() -> dict:
@@ -396,84 +499,33 @@ def create_app(config: RunnerConfig, store: BaseResultStore,
     def _sse(event: str, **data) -> bytes:
         return f"event: {event}\ndata: {json.dumps(data)}\n\n".encode()
 
-    async def _submit_stream(data, team, extra_env, method_tag,
-                             run_id, run_key, canceller, tmp):
-        """SSE body for a streaming submission (``Accept: text/event-stream``).
-
-        Emits ``received`` → ``queued`` (queue depth) → ``running`` → per-dataset
-        ``dataset`` progress (public codename + ok/fail ONLY — never scores or raw
-        errors) → terminal ``result`` (same payload as the JSON path) or ``error``.
-
-        The submission semaphore is held by the *worker task*, not this generator, so
-        a client that disconnects mid-stream can't release the slot early: the run
-        finishes server-side (results still persisted) and teardown is deferred until
-        it does."""
-        RUNNING, DONE = object(), object()
-        task = None
-
-        def _teardown(*_):
-            runs.pop(run_id, None)
-            pending[team] = pending.get(team, 1) - 1
-            if pending[team] <= 0:
-                pending.pop(team, None)
-            shutil.rmtree(tmp, ignore_errors=True)
-
+    async def _stream_body(run_id, entry, q):
+        """SSE progress for a streaming submission. The run itself is a detached
+        worker task (spawned in the handler), so this generator only OBSERVES it —
+        a disconnect here can't stop, unslot, or lose the run."""
+        yield _sse("received", run_id=run_id, team=entry["team"],
+                   total=len(config.datasets))
+        yield _sse("queued", ahead=sum(
+            1 for r in runs.values()
+            if r["id"] < run_id and r.get("status") in ("queued", "running")))
+        while True:
+            kind, payload = await q.get()
+            if kind == "done":
+                break
+            if kind == "running":
+                yield _sse("running")
+            elif kind == "dataset":
+                yield _sse("dataset", **payload)
         try:
-            yield _sse("received", run_id=run_id, team=team,
-                       total=len(config.datasets))
-            yield _sse("queued", ahead=sum(1 for r in runs.values()
-                                           if r["id"] < run_id))
-            q: asyncio.Queue = asyncio.Queue()
-            loop = asyncio.get_running_loop()
-
-            def on_progress(ev: dict) -> None:      # runs on the worker thread
-                out = {"phase": ev.get("phase"), "index": ev.get("index"),
-                       "total": ev.get("total"), "dataset": label(ev.get("dataset"))}
-                if ev.get("phase") == "done":
-                    out["ok"] = bool(ev.get("ok"))
-                loop.call_soon_threadsafe(q.put_nowait, ("dataset", out))
-
-            async def _worker():
-                try:
-                    async with submit_slots:                 # slot held for the run
-                        loop.call_soon_threadsafe(q.put_nowait, (RUNNING, None))
-                        records = await run_in_threadpool(
-                            _run_records, data, team, extra_env,
-                            on_progress, canceller, run_key)
-                    await _finalize(records, method_tag)     # persist regardless of client
-                    return records
-                finally:
-                    loop.call_soon_threadsafe(q.put_nowait, (DONE, None))
-
-            task = asyncio.create_task(_worker())
-            while True:
-                kind, payload = await q.get()
-                if kind is DONE:
-                    break
-                if kind is RUNNING:
-                    yield _sse("running")
-                else:
-                    yield _sse("dataset", **payload)
-            try:
-                records = await task
-            except (FileNotFoundError, ValueError) as e:
-                yield _sse("error", message=_redact_dataset_names(
-                    f"invalid submission: {e}", config))
-                return
-            yield _sse("result", **_build_payload(records, team))
-        except Exception as e:  # noqa: BLE001  (GeneratorExit/disconnect passes through)
-            print(f"[submit] stream failed for {team!r}: {e}", file=sys.stderr, flush=True)
-            try:
-                yield _sse("error", message="internal error while running your submission")
-            except Exception:  # noqa: BLE001
-                pass
-        finally:
-            # Normal end: task is done -> tear down now. Client disconnect mid-run:
-            # task still going -> let it finish + persist, tear down on completion.
-            if task is not None and not task.done():
-                task.add_done_callback(_teardown)
-            else:
-                _teardown()
+            records = await entry["task"]
+        except (FileNotFoundError, ValueError) as e:
+            yield _sse("error", message=_redact_dataset_names(
+                f"invalid submission: {e}", config))
+            return
+        except BaseException:  # noqa: BLE001
+            yield _sse("error", message="internal error while running your submission")
+            return
+        yield _sse("result", **_build_payload(records, entry["team"]))
 
     @app.post("/submit")
     async def submit(team: str = Form(default=""), file: UploadFile = File(...),
@@ -548,117 +600,126 @@ def create_app(config: RunnerConfig, store: BaseResultStore,
 
         when = datetime.datetime.now(datetime.timezone.utc)
 
-        # Persistent scratch (NOT a `with` block): on the streaming path the run
-        # outlives this handler, so the SSE generator owns teardown of `tmp`.
+        # Unpack + validate structure (free — no rate-limit charge). tmp isn't needed
+        # after this; the run works off `data` in memory, so drop it immediately.
         tmp = Path(tempfile.mkdtemp(prefix="aletheia-upload-"))
-        stream_owns_cleanup = False
         try:
             zpath = tmp / "submission.zip"
             zpath.write_bytes(data)
-            root = tmp / "unpacked"
-
-            # Validate the submission's STRUCTURE before charging a rate-limit
-            # attempt: it must unpack and contain exactly one notebook. A
-            # structurally-invalid submission is rejected here for free — only a
-            # real, runnable submission below costs an attempt. (run_pipeline
-            # re-checks, so --dry enforces the same one-notebook rule.)
             try:
-                await run_in_threadpool(pipeline.unpack, zpath, root)
-                await run_in_threadpool(pipeline.validate_submission, root)
-            except (FileNotFoundError, ValueError) as e:
+                await run_in_threadpool(pipeline.unpack, zpath, tmp / "unpacked")
+                await run_in_threadpool(pipeline.validate_submission, tmp / "unpacked")
+            except (FileNotFoundError, ValueError, zipfile.BadZipFile) as e:
+                # A truncated / non-zip upload raises BadZipFile (not ValueError) —
+                # reject it cleanly as a 400 instead of leaking a 500.
                 raise HTTPException(400, f"invalid submission: {e}")
-
-            # Consume a submission slot (per-team fixed-window limit) RIGHT BEFORE we
-            # run it — so a rejected submission never costs an attempt. Bucket
-            # read-modify-write, so under the lock.
-            async with bucket_lock:
-                allowed, retry = await run_in_threadpool(limiter.check_and_consume, team)
-            if not allowed:
-                raise HTTPException(
-                    429,
-                    f"rate limit reached: {limiter.max} submission(s) per "
-                    f"{limiter.window / 3600:g}h. Try again in ~{retry}s.",
-                    headers={"Retry-After": str(retry)})
-
-            # Count this submission as in-flight (queued or running) for /api/me until
-            # it finishes, pass or fail.
-            pending[team] = pending.get(team, 0) + 1
-            try:
-                # Archive the raw zip (every submission we run, pass or fail) so it
-                # can be retrieved later. Unique path -> no lock; never sink the run.
-                if archive is not None:
-                    try:
-                        await run_in_threadpool(archive.save, team, data, when)
-                    except Exception as e:  # noqa: BLE001
-                        print(f"[archive] failed to store submission for {team!r}: {e}",
-                              file=sys.stderr, flush=True)
-
-                # (Produced submission.csv files are archived by the backend: the
-                # Fargate task writes them to S3 under the run prefix.)
-
-                # The submitter's keys are injected into their sandboxed run:
-                # NDIF_API_KEY for nnsight remote traces (run_ndif_key was chosen by
-                # tier up front: their own key if tier_1, else the shared leaderboard
-                # key), HF_TOKEN for loading gated HF models they have access to. (The
-                # token can't reach the private eval/labels — that's the organizers'
-                # org, not the participant's.)
-                extra_env = {"NDIF_API_KEY": run_ndif_key}
-                if hf_token:
-                    extra_env["HF_TOKEN"] = hf_token
-                # Optional row cap, forwarded as ALETHEIA_LIMIT for the notebook to
-                # honor (e.g. score only the first N rows). Ignore if not a positive int.
-                if row_limit is not None:
-                    try:
-                        if int(row_limit) > 0:
-                            extra_env["ALETHEIA_LIMIT"] = str(int(row_limit))
-                    except ValueError:
-                        pass
-
-                run_seq["n"] += 1
-                run_id = run_seq["n"]
-                run_key = uuid.uuid4().hex     # unique S3 prefix (survives Space restarts)
-                canceller = backend.new_canceller()
-                runs[run_id] = {"id": run_id, "team": team,
-                                "started_at": when.isoformat(), "canceller": canceller}
-
-                # A client that asked for a stream gets the SSE body; the generator
-                # takes over teardown (pending / runs / tmp) since the run outlives
-                # this coroutine. Everyone else keeps the single-JSON behavior.
-                if accept and "text/event-stream" in accept.lower():
-                    stream_owns_cleanup = True
-                    return StreamingResponse(
-                        _submit_stream(data, team, extra_env, method_tag,
-                                       run_id, run_key, canceller, tmp),
-                        media_type="text/event-stream",
-                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-
-                # ---- default JSON path: run to completion, return one body ----
-                # The run is heavy (venv, pip, notebook execution, NDIF traces). Run it
-                # off the event loop in a worker thread, bounded by the semaphore: a
-                # burst of submissions queues here and at most MAX_CONCURRENT_SUBMISSIONS
-                # run at once. The submission was already unpacked + validated above.
-                try:
-                    async with submit_slots:
-                        try:
-                            records = await run_in_threadpool(
-                                _run_records, data, team, extra_env,
-                                None, canceller, run_key)
-                        except (FileNotFoundError, ValueError) as e:
-                            raise HTTPException(
-                                400, _redact_dataset_names(f"invalid submission: {e}", config))
-                finally:
-                    runs.pop(run_id, None)
-
-                await _finalize(records, method_tag)
-                return _build_payload(records, team)
-            finally:
-                if not stream_owns_cleanup:
-                    pending[team] = pending.get(team, 1) - 1
-                    if pending[team] <= 0:
-                        pending.pop(team, None)
         finally:
-            if not stream_owns_cleanup:
-                shutil.rmtree(tmp, ignore_errors=True)
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        # One in-flight submission per team: reject a duplicate rather than queue it
+        # (doesn't cost a rate-limit attempt). Checked against live runs only.
+        if any(r["team"] == team and r.get("status") in ("queued", "running")
+               for r in runs.values()):
+            raise HTTPException(
+                409, "you already have a submission queued or running — wait for it "
+                     "to finish before submitting again.")
+
+        # Charge a rate-limit attempt right before we commit to running it.
+        async with bucket_lock:
+            allowed, retry = await run_in_threadpool(limiter.check_and_consume, team)
+        if not allowed:
+            raise HTTPException(
+                429, f"rate limit reached: {limiter.max} submission(s) per "
+                     f"{limiter.window / 3600:g}h. Try again in ~{retry}s.",
+                headers={"Retry-After": str(retry)})
+
+        # Archive the raw zip (every submission we run) for later retrieval.
+        if archive is not None:
+            try:
+                await run_in_threadpool(archive.save, team, data, when)
+            except Exception as e:  # noqa: BLE001
+                print(f"[archive] failed to store submission for {team!r}: {e}",
+                      file=sys.stderr, flush=True)
+
+        extra_env = {"NDIF_API_KEY": run_ndif_key}
+        if hf_token:
+            extra_env["HF_TOKEN"] = hf_token
+        if row_limit is not None:
+            try:
+                if int(row_limit) > 0:
+                    extra_env["ALETHEIA_LIMIT"] = str(int(row_limit))
+            except ValueError:
+                pass
+
+        # Build the run and spawn its worker HERE — a detached task that owns the
+        # slot, the run, and persistence, so it completes and scores regardless of the
+        # client. Teardown is the task's done-callback, so runs/pending are cleared
+        # exactly when the run finishes (no leaked entries on disconnect).
+        run_seq["n"] += 1
+        run_id = run_seq["n"]
+        run_key = uuid.uuid4().hex          # unique S3 prefix (survives restarts)
+        canceller = backend.new_canceller()
+        q: asyncio.Queue = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+        entry = {"id": run_id, "team": team, "status": "queued",
+                 "started_at": when.isoformat(), "dispatched_at": None,
+                 "progress": None, "canceller": canceller, "task": None}
+
+        def _on_progress(ev: dict) -> None:      # runs on the worker thread
+            out = {"phase": ev.get("phase"), "index": ev.get("index"),
+                   "total": ev.get("total"), "dataset": label(ev.get("dataset"))}
+            if ev.get("phase") == "done":
+                out["ok"] = bool(ev.get("ok"))
+            entry["progress"] = {"index": ev.get("index"), "total": ev.get("total")}
+            loop.call_soon_threadsafe(q.put_nowait, ("dataset", out))
+
+        async def _worker():
+            try:
+                async with submit_slots:                 # slot held only while running
+                    entry["status"] = "running"
+                    entry["dispatched_at"] = datetime.datetime.now(
+                        datetime.timezone.utc).isoformat()
+                    loop.call_soon_threadsafe(q.put_nowait, ("running", None))
+                    records = await run_in_threadpool(
+                        _run_records, data, team, extra_env, _on_progress,
+                        canceller, run_key)
+                await _finalize(records, method_tag)      # persist regardless of client
+                entry["status"] = "cancelled" if canceller.cancelled else "done"
+                return records
+            except BaseException:  # noqa: BLE001
+                entry["status"] = "cancelled" if canceller.cancelled else "failed"
+                raise
+            finally:
+                loop.call_soon_threadsafe(q.put_nowait, ("done", None))
+
+        def _teardown(_task):
+            try:
+                _task.exception()   # retrieve (avoids "exception never retrieved" warnings)
+            except BaseException:   # noqa: BLE001
+                pass
+            runs.pop(run_id, None)
+            pending[team] = pending.get(team, 1) - 1
+            if pending[team] <= 0:
+                pending.pop(team, None)
+
+        pending[team] = pending.get(team, 0) + 1
+        runs[run_id] = entry
+        task = asyncio.create_task(_worker())
+        entry["task"] = task
+        task.add_done_callback(_teardown)
+
+        # Stream clients get live progress; others wait for one JSON body. Either way
+        # the run is already detached and will finish + persist on its own.
+        if accept and "text/event-stream" in accept.lower():
+            return StreamingResponse(
+                _stream_body(run_id, entry, q),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+        try:
+            records = await task
+        except (FileNotFoundError, ValueError) as e:
+            raise HTTPException(400, _redact_dataset_names(f"invalid submission: {e}", config))
+        return _build_payload(records, team)
 
     return app
 

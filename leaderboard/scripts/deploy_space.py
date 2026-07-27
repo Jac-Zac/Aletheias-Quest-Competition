@@ -24,7 +24,7 @@ UPLOAD_IGNORE = [
     ".git/*", "tests/*", "scripts/*", "space/*",
     "README.md", "DESIGN.md",
     "*.pyc", "__pycache__/*", "*.egg-info/*", ".pytest_cache/*",
-    "results.jsonl", "*.zip", ".gitignore",
+    "results.jsonl", "*.zip", ".gitignore", "runner-test.yaml",
     # Fargate migration tooling: MUST NOT ship to the Space — it holds the AWS
     # dispatcher key, a multi-GB venv, and the baked build context. The Space only
     # needs the package source + Dockerfile + runner.yaml.
