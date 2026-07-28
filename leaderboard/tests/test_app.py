@@ -84,7 +84,7 @@ def test_submit_scores_and_appears_on_leaderboard(client):
     res = _post(client, team="team-a", key="key-a")
     assert res.status_code == 200, res.text
     body = res.json()
-    # `scores` is keyed by notebook = mean balanced accuracy (the primary metric).
+    # `scores` is keyed by notebook = mean AUROC (the primary metric).
     assert body["scores"]["fixture.ipynb"] == 1.0 and not body["failures"]
     nb = body["results"][0]
     assert nb["metrics"] == {"balanced_accuracy": 1.0, "auroc": 1.0, "recall": 1.0, "fpr": 0.0}
