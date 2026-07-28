@@ -288,8 +288,9 @@ def _fail_mark() -> str:
     return _dim(" ✗")
 
 
-# Metric keys -> short labels, in display order (balanced accuracy is primary).
-_METRICS = [("balanced_accuracy", "Bal.Acc"), ("auroc", "AUROC"),
+# Metric keys -> short labels, in display order (AUROC is the ranking metric,
+# balanced accuracy breaks ties).
+_METRICS = [("auroc", "AUROC"), ("balanced_accuracy", "Bal.Acc"),
             ("recall", "Recall"), ("fpr", "FPR")]
 
 

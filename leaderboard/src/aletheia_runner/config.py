@@ -110,12 +110,13 @@ def dataset_label(key: str) -> str:
     digest = int(hashlib.sha256(dataset_task(key).encode("utf-8")).hexdigest(), 16)
     return f"Dataset {_DATASET_CODENAMES[digest % len(_DATASET_CODENAMES)]}"
 
-# Metrics computed per dataset, in display order. ``balanced_accuracy`` is the
-# primary metric (leaderboard ordering); ``auroc`` is shown secondarily. Defined
-# here (dependency-light) so scoring, the result store, and the API all share them.
-METRIC_KEYS = ("balanced_accuracy", "auroc", "recall", "fpr")
-PRIMARY_METRIC = "balanced_accuracy"
-SECONDARY_METRIC = "auroc"
+# Metrics computed per dataset, in display order. ``auroc`` is the primary metric
+# (leaderboard ordering); ``balanced_accuracy`` is shown secondarily and breaks
+# ties. Defined here (dependency-light) so scoring, the result store, and the API
+# all share them.
+METRIC_KEYS = ("auroc", "balanced_accuracy", "recall", "fpr")
+PRIMARY_METRIC = "auroc"
+SECONDARY_METRIC = "balanced_accuracy"
 
 
 @dataclass(frozen=True)
