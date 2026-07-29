@@ -1,0 +1,77 @@
+datasets:
+  - name: aletheias-quest/dev-instructed-deception-Qwen3.5-27B-None
+    labels_uri: aletheias-quest/dev-instructed-deception-Qwen3.5-27B-None-labels
+    id_column: index
+    label_column: deceptive
+  - name: aletheias-quest/dev-instructed-deception-Qwen3.5-27B-a-mo-qwen3.5-27b-1
+    labels_uri: aletheias-quest/dev-instructed-deception-Qwen3.5-27B-a-mo-qwen3.5-27b-1-labels
+    id_column: index
+    label_column: deceptive
+  - name: aletheias-quest/dev-instructed-deception-Qwen3.5-27B-a-mo-qwen3.5-27b-3
+    labels_uri: aletheias-quest/dev-instructed-deception-Qwen3.5-27B-a-mo-qwen3.5-27b-3-labels
+    id_column: index
+    label_column: deceptive
+  - name: aletheias-quest/dev-instructed-deception-Qwen3.5-27B-a-mo-qwen3.5-27b-4
+    labels_uri: aletheias-quest/dev-instructed-deception-Qwen3.5-27B-a-mo-qwen3.5-27b-4-labels
+    id_column: index
+    label_column: deceptive
+  - name: aletheias-quest/dev-instructed-deception-Qwen3.5-27B-a-mo-qwen3.5-27b-5
+    labels_uri: aletheias-quest/dev-instructed-deception-Qwen3.5-27B-a-mo-qwen3.5-27b-5-labels
+    id_column: index
+    label_column: deceptive
+  - name: aletheias-quest/dev-instructed-deception-Qwen3.5-27B-a-mo-qwen3.5-27b-6
+    labels_uri: aletheias-quest/dev-instructed-deception-Qwen3.5-27B-a-mo-qwen3.5-27b-6-labels
+    id_column: index
+    label_column: deceptive
+  - name: aletheias-quest/dev-instructed-deception-Qwen3.5-27B-a-mo-qwen3.5-27b-7
+    labels_uri: aletheias-quest/dev-instructed-deception-Qwen3.5-27B-a-mo-qwen3.5-27b-7-labels
+    id_column: index
+    label_column: deceptive
+  - name: aletheias-quest/dev-instructed-deception-Qwen3.5-27B-b-mo-qwen3.5-27b
+    labels_uri: aletheias-quest/dev-instructed-deception-Qwen3.5-27B-b-mo-qwen3.5-27b-labels
+    id_column: index
+    label_column: deceptive
+  - name: aletheias-quest/dev-instructed-deception-Qwen3.5-27B-c-mo-qwen3.5-27b
+    labels_uri: aletheias-quest/dev-instructed-deception-Qwen3.5-27B-c-mo-qwen3.5-27b-labels
+    id_column: index
+    label_column: deceptive
+  - name: aletheias-quest/dev-instructed-deception-Qwen3.5-27B-g-st-qwen3.5-27b
+    labels_uri: aletheias-quest/dev-instructed-deception-Qwen3.5-27B-g-st-qwen3.5-27b-labels
+    id_column: index
+    label_column: deceptive
+  - name: aletheias-quest/dev-varied-deception-Qwen3.5-27B-None
+    labels_uri: aletheias-quest/dev-varied-deception-Qwen3.5-27B-None-labels
+    id_column: index
+    label_column: deceptive
+  - name: aletheias-quest/dev-varied-deception-Qwen3.5-27B-a-mo-qwen3.5-27b-1
+    labels_uri: aletheias-quest/dev-varied-deception-Qwen3.5-27B-a-mo-qwen3.5-27b-1-labels
+    id_column: index
+    label_column: deceptive
+  - name: aletheias-quest/dev-varied-deception-Qwen3.5-27B-a-mo-qwen3.5-27b-3
+    labels_uri: aletheias-quest/dev-varied-deception-Qwen3.5-27B-a-mo-qwen3.5-27b-3-labels
+    id_column: index
+    label_column: deceptive
+  - name: aletheias-quest/dev-varied-deception-Qwen3.5-27B-a-mo-qwen3.5-27b-4
+    labels_uri: aletheias-quest/dev-varied-deception-Qwen3.5-27B-a-mo-qwen3.5-27b-4-labels
+    id_column: index
+    label_column: deceptive
+  - name: aletheias-quest/dev-varied-deception-Qwen3.5-27B-a-mo-qwen3.5-27b-5
+    labels_uri: aletheias-quest/dev-varied-deception-Qwen3.5-27B-a-mo-qwen3.5-27b-5-labels
+    id_column: index
+    label_column: deceptive
+  - name: aletheias-quest/dev-varied-deception-Qwen3.5-27B-a-mo-qwen3.5-27b-6
+    labels_uri: aletheias-quest/dev-varied-deception-Qwen3.5-27B-a-mo-qwen3.5-27b-6-labels
+    id_column: index
+    label_column: deceptive
+  - name: aletheias-quest/dev-varied-deception-Qwen3.5-27B-a-mo-qwen3.5-27b-7
+    labels_uri: aletheias-quest/dev-varied-deception-Qwen3.5-27B-a-mo-qwen3.5-27b-7-labels
+    id_column: index
+    label_column: deceptive
+  - name: aletheias-quest/dev-varied-deception-Qwen3.5-27B-b-mo-qwen3.5-27b
+    labels_uri: aletheias-quest/dev-varied-deception-Qwen3.5-27B-b-mo-qwen3.5-27b-labels
+    id_column: index
+    label_column: deceptive
+  - name: aletheias-quest/dev-varied-deception-Qwen3.5-27B-c-mo-qwen3.5-27b
+    labels_uri: aletheias-quest/dev-varied-deception-Qwen3.5-27B-c-mo-qwen3.5-27b-labels
+    id_column: index
+    label_column: deceptive
