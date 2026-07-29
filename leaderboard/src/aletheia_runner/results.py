@@ -87,6 +87,18 @@ def _mean(values: list[float | None]) -> float | None:
     return sum(vals) / len(vals) if vals else None
 
 
+def _rank_key(row: dict) -> tuple[float, float]:
+    """Sort key for a leaderboard row: primary metric, secondary as the tie-break.
+
+    An undefined metric (``None`` — AUROC on a single-class dataset) sorts last in
+    a descending sort rather than raising on the comparison."""
+    def val(key: str) -> float:
+        v = row.get(key)
+        return float("-inf") if v is None else v
+
+    return (val(PRIMARY_METRIC), val(SECONDARY_METRIC))
+
+
 def summarize_submission(recs: list["ResultRecord"]) -> dict:
     """Summarize one submission's per-dataset records (all sharing a team/notebook/
     submitted_at). **All-or-nothing**: the submission counts only if *every* dataset
@@ -139,14 +151,18 @@ class BaseResultStore:
         raise NotImplementedError
 
     def leaderboard(self) -> list[dict]:
-        """Best submission per (team, notebook), ordered by mean balanced accuracy.
+        """Best submission per (team, notebook), ordered by mean AUROC.
 
         Each notebook is scored against every dataset; a submission's headline
         numbers are the **mean across datasets** of each metric. The per-dataset
         breakdown (now surfaced, with dataset names) and total runtime ride along
         for the click-to-expand view. Resubmitting updates a row only if the new
-        submission's primary metric (balanced accuracy) is better; ``submitted_at``
-        reflects when that best was achieved.
+        submission's primary metric (AUROC) is better, with balanced accuracy
+        breaking ties; ``submitted_at`` reflects when that best was achieved.
+
+        Unlike balanced accuracy, AUROC is **undefined** on a single-class dataset
+        (``None``), so a scored submission can land here without one: it keeps its
+        row and sorts last rather than dropping off the board.
         """
         from collections import defaultdict
 
@@ -156,23 +172,23 @@ class BaseResultStore:
         for r in self.all():
             subs[(r.team, r.notebook, r.submitted_at)].append(r)
 
-        best: dict[tuple, tuple[float, dict]] = {}     # (team, notebook) -> (primary, row)
+        best: dict[tuple, tuple[tuple, dict]] = {}     # (team, notebook) -> (order, row)
         for (team, notebook, stamp), recs in subs.items():
             summ = summarize_submission(recs)
-            primary = summ["metrics"].get(PRIMARY_METRIC)
-            if primary is None:                        # no dataset scored
+            if not summ["ok"]:                         # not every dataset scored
                 continue
             row = {"team": team, "notebook": notebook, "submitted_at": stamp,
-                   PRIMARY_METRIC: primary,
+                   PRIMARY_METRIC: summ["metrics"].get(PRIMARY_METRIC),
                    SECONDARY_METRIC: summ["metrics"].get(SECONDARY_METRIC),
                    "metrics": summ["metrics"], "datasets": summ["datasets"],
                    "runtime_seconds": summ["runtime_seconds"], "tag": summ.get("tag")}
             tn = (team, notebook)
-            if tn not in best or primary > best[tn][0]:
-                best[tn] = (primary, row)
+            order = _rank_key(row)
+            if tn not in best or order > best[tn][0]:
+                best[tn] = (order, row)
 
         rows = [row for _, row in best.values()]
-        rows.sort(key=lambda x: x[PRIMARY_METRIC], reverse=True)
+        rows.sort(key=_rank_key, reverse=True)
         return rows
 
 

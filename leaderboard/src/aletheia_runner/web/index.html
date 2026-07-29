@@ -121,10 +121,27 @@
       font-family: var(--serif); font-weight: 400; font-size: 11.5px;
       letter-spacing: 0.2em; text-transform: uppercase; color: var(--muted);
       text-align: left; padding: 0 14px 12px; border-bottom: 1.5px solid var(--rule-bold);
+      /* the key-metric column carries an extra line above its label — bottom-align
+         so every header still sits on one baseline */
+      vertical-align: bottom;
       animation: rise 0.8s 0.5s both ease-out;
     }
     .ledger th.c-rank { width: 64px; }
     .ledger th.c-score, .ledger td.c-score { text-align: right; }
+
+    /* Sortable metric headers. The primary (competition) metric is inked darker so
+       the key column reads as the key column even when sorted by the other one. */
+    .ledger th.sortable { cursor: pointer; user-select: none; }
+    .ledger th.sortable:hover { color: var(--ink); }
+    .ledger th.sortable:focus-visible { outline: 1px solid var(--accent); outline-offset: 3px; }
+    .ledger th.primary-metric { color: var(--ink); }
+    .ledger th.primary-metric .key-mark {
+      display: block; font-size: 8.5px; letter-spacing: 0.18em;
+      text-transform: uppercase; color: var(--accent); margin-bottom: 3px; }
+    .sort-arrow { display: inline-block; width: 0.8em; margin-left: 0.35em;
+      color: var(--faint); }
+    .sort-arrow:empty { display: none; }   /* the idle column claims no extra width */
+    .ledger th.sorted .sort-arrow { color: var(--accent); }
     .ledger tbody td {
       padding: 17px 14px; border-bottom: 1px solid var(--rule);
       vertical-align: baseline;
@@ -205,7 +222,8 @@
       transform: translateY(-50%); border: 6px solid transparent; border-right-color: var(--rule-bold); }
     .dq:hover .dq-tip, .dq:focus .dq-tip, .dq:focus-within .dq-tip { display: block; }
 
-    /* secondary metric (AUROC) + runtime, shown quietly next to the headline score */
+    /* secondary metric (balanced accuracy) + runtime, shown quietly next to the
+       headline score */
     .ledger th.c-second, .ledger td.c-second,
     .ledger th.c-run, .ledger td.c-run { text-align: right; white-space: nowrap; }
     .second { font-family: var(--display); font-size: 1.25rem; color: var(--muted);
@@ -375,6 +393,15 @@
     const PAGE_SIZE = 20;         // entrants shown per page
     let showDisqualified = false; // DQ'd submissions are hidden unless this is on
     let showAllSubs = false;      // collapse to each team's best unless this is on
+    // Display sort: which metric column the rows are ordered by, and which way.
+    // null = the competition order (primary metric, secondary as tie-break).
+    let sortMetric = null;
+    let sortDesc = true;
+
+    // The metric keys the server ranks on. The page follows the backend, so
+    // swapping PRIMARY_METRIC there re-labels and re-orders these columns here.
+    function primaryKey()   { return (lastData && lastData.primary) || "auroc"; }
+    function secondaryKey() { return (lastData && lastData.secondary) || "balanced_accuracy"; }
 
     // Little box glyph for a method tag (hollow = white-box, filled = black-box).
     function tagBadge(tag) {
@@ -425,7 +452,21 @@
       document.getElementById("board").scrollIntoView({ behavior: "smooth", block: "start" });
     }
 
+    // Click a metric header to sort by it; click the same one again to flip the
+    // direction. Ranks don't renumber — they're the standing on the primary metric
+    // (see renderBoard), so sorting by the other column is a reading order, not a
+    // different competition.
+    function setSort(key) {
+      if (sortMetric === key) { sortDesc = !sortDesc; }
+      else { sortMetric = key; sortDesc = true; }
+      currentPage = 1;
+      renderBoard();
+    }
+
     const METRIC_LABEL = { balanced_accuracy: "Bal. Accuracy", auroc: "AUROC",
+                           recall: "Recall", fpr: "FPR" };
+    // Compact labels for the per-dataset breakdown / desk tables.
+    const METRIC_SHORT = { balanced_accuracy: "Bal. Acc", auroc: "AUROC",
                            recall: "Recall", fpr: "FPR" };
     function fmt(x) { return (x === null || x === undefined) ? "—" : Number(x).toFixed(4); }
     function nbName(p) { return String(p || "").split("/").pop(); }
@@ -433,6 +474,7 @@
     // the real names are private, so this is just a pass-through.
     function dsName(k) { return String(k || ""); }
     function metricLabel(k) { return METRIC_LABEL[k] || (k || "").toUpperCase(); }
+    function metricShort(k) { return METRIC_SHORT[k] || (k || "").toUpperCase(); }
     function fmtDur(s) {
       if (s === null || s === undefined) return "—";
       s = Math.round(s); const m = Math.floor(s / 60), ss = s % 60;
@@ -459,21 +501,40 @@
       // The headline mean & ranking average only the "counted" datasets; the rest
       // are scored and shown for reference but greyed and don't move the score.
       const anyExcluded = datasets.some(d => d.counted === false);
+      // Primary metric first (emphasized), then the secondary, then the rest.
+      const cols = [primaryKey(), secondaryKey(), "recall", "fpr"];
       const rows = datasets.map(d => `<tr class="${d.counted === false ? "excluded" : ""}">
           <td class="d-name">${esc(dsName(d.dataset))}</td>
           <td class="d-meta">${esc(d.model_id || "—")}</td>
           <td class="d-meta">${esc(d.lora_id || "—")}</td>
-          <td class="d-prim">${fmt(d.balanced_accuracy)}</td>
-          <td>${fmt(d.auroc)}</td>
-          <td>${fmt(d.recall)}</td>
-          <td>${fmt(d.fpr)}</td></tr>`).join("");
+          ${cols.map((k, i) => `<td class="${i === 0 ? "d-prim" : ""}">${fmt(d[k])}</td>`).join("")}
+          </tr>`).join("");
       const note = anyExcluded
         ? '<div class="ds-note">Headline score &amp; ranking average the validation '
           + 'datasets only; greyed rows are scored for reference.</div>'
         : "";
       return `<table class="ds"><thead><tr>
-          <th class="d-name">Dataset</th><th class="d-meta">Model</th><th class="d-meta">LoRA</th><th>Bal. Acc</th><th>AUROC</th>
-          <th>Recall</th><th>FPR</th></tr></thead><tbody>${rows}</tbody></table>${note}`;
+          <th class="d-name">Dataset</th><th class="d-meta">Model</th><th class="d-meta">LoRA</th>
+          ${cols.map(k => `<th>${esc(metricShort(k))}</th>`).join("")}
+          </tr></thead><tbody>${rows}</tbody></table>${note}`;
+    }
+
+    // One sortable metric column header. ``isPrimary`` marks the metric the
+    // competition is decided on — inked darker and labelled, so the key column is
+    // obvious no matter which one the table is currently sorted by.
+    function metricHeader(key, cls, isPrimary) {
+      const active = (sortMetric || primaryKey()) === key;
+      const arrow = active ? (sortDesc ? "▼" : "▲") : "";
+      const dir = active ? (sortDesc ? "descending" : "ascending") : "none";
+      const mark = isPrimary ? '<span class="key-mark">Ranked on</span>' : "";
+      // aria-sort belongs on the column header itself, so the th keeps its implicit
+      // columnheader role and just becomes focusable/activatable.
+      return `<th class="${cls} sortable ${active ? "sorted" : ""} ${isPrimary ? "primary-metric" : ""}"
+          tabindex="0" aria-sort="${dir}"
+          title="Sort by ${esc(metricLabel(key))}"
+          onclick="setSort('${key}')"
+          onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();setSort('${key}')}"
+        >${mark}${esc(metricShort(key))}<span class="sort-arrow">${arrow}</span></th>`;
     }
 
     function toggleRow(i) {
@@ -489,8 +550,8 @@
       const board = document.getElementById("board");
       const meta = document.getElementById("meta");
       if (!lastData) return;
-      const primary = metricLabel(lastData.primary || "balanced_accuracy");
-      const secondary = metricLabel(lastData.secondary || "auroc");
+      const primaryK = primaryKey(), secondaryK = secondaryKey();
+      const primary = metricLabel(primaryK);
       const all = lastData.results || [];
       const rows = tagFilter === "all" ? all : all.filter(r => r.tag === tagFilter);
       // Disqualified submissions are hidden unless the "show disqualified" toggle is on.
@@ -513,6 +574,10 @@
       let scope = tagFilter === "all" ? "" : `     /     ${tagFilter}-box only`;
       if (dqHidden > 0) scope += `     /     ${dqHidden} disqualified hidden`;
       if (collapsed > 0) scope += `     /     ${collapsed} more submission${collapsed === 1 ? "" : "s"} hidden`;
+      // Reading the table in a non-competition order is worth saying out loud, so
+      // nobody mistakes a Bal. Accuracy sort for the standings.
+      if (sortMetric && sortMetric !== primaryK) scope += `     /     sorted by ${metricLabel(sortMetric)}`;
+      else if (sortMetric && !sortDesc) scope += `     /     ascending`;
       const now = new Date().toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
       meta.textContent = `Ranked by ${primary}     /     ${visible.length} entr${visible.length === 1 ? "y" : "ies"}${scope}     /     revised ${now}`;
 
@@ -537,6 +602,23 @@
                  leader: rankable && rank === 1 };
       });
 
+      // The ranks above come from the competition order the API sends (primary
+      // metric, secondary as tie-break). A metric-header sort only changes the
+      // reading order: every row keeps the rank it earned, and rows whose metric is
+      // undefined go last in either direction. The sort is stable, so equal values
+      // stay in competition order.
+      if (sortMetric) {
+        const val = row => {
+          const v = row.r[sortMetric];
+          return (v === null || v === undefined) ? null : v;
+        };
+        ranked.sort((a, b) => {
+          const av = val(a), bv = val(b);
+          if (av === null || bv === null) return av === bv ? 0 : (av === null ? 1 : -1);
+          return sortDesc ? bv - av : av - bv;
+        });
+      }
+
       const totalPages = Math.max(1, Math.ceil(ranked.length / PAGE_SIZE));
       if (currentPage > totalPages) currentPage = totalPages;
       if (currentPage < 1) currentPage = 1;
@@ -559,8 +641,8 @@
             <td class="c-sub"><span class="sub">${esc(nbName(r.notebook))}</span>${tagBadge(r.tag)}</td>
             <td class="c-when"><span class="when">${esc(fmtTime(r.submitted_at))}</span></td>
             <td class="c-run"><span class="run">${esc(fmtDur(r.runtime_seconds))}</span></td>
-            <td class="c-second"><span class="second">${fmt(r.auroc)}</span></td>
-            <td class="c-score"><span class="score">${fmt(r.balanced_accuracy)}</span></td>
+            <td class="c-second"><span class="second">${fmt(r[secondaryK])}</span></td>
+            <td class="c-score"><span class="score">${fmt(r[primaryK])}</span></td>
           </tr>
           <tr class="detail hidden" data-i="${gi}"><td colspan="7">${dsTable(r.datasets)}</td></tr>`;
       }).join("");
@@ -579,8 +661,8 @@
           <th class="c-sub">Submission</th>
           <th class="c-when">Recorded</th>
           <th class="c-run">Runtime</th>
-          <th class="c-second">${esc(secondary)}</th>
-          <th class="c-score">${esc(primary)}</th>
+          ${metricHeader(secondaryK, "c-second", false)}
+          ${metricHeader(primaryK, "c-score", true)}
         </tr></thead>
         <tbody>${body}</tbody></table>${pager}`;
       firstRender = false;
@@ -694,14 +776,15 @@
             <td>${esc(s.notebook)}${tagBadge(s.tag)}${attemptsBadge(s)}</td>
             <td class="when">${esc(fmtTime(s.submitted_at))}</td>
             <td class="s-res run">${esc(fmtDur(s.runtime_seconds))}</td>
-            <td class="s-res second">${fmt(m.auroc)}</td>
-            <td class="s-res s-score">${fmt(m.balanced_accuracy)}</td></tr>
+            <td class="s-res second">${fmt(m[secondaryKey()])}</td>
+            <td class="s-res s-score">${fmt(m[primaryKey()])}</td></tr>
           <tr class="me-detail hidden" data-mi="${i}"><td colspan="5">${dsTable(s.datasets)}</td></tr>`;
       }).join("");
       const body = rows
         ? `<table class="me-subs"><thead><tr>
              <th>Submission</th><th>When</th><th class="s-res">Runtime</th>
-             <th class="s-res">AUROC</th><th class="s-res">Bal. Acc</th>
+             <th class="s-res">${esc(metricShort(secondaryKey()))}</th>
+             <th class="s-res">${esc(metricShort(primaryKey()))}</th>
              </tr></thead><tbody>${rows}</tbody></table>`
         : '<div class="me-empty">No submissions yet.</div>';
       const toggle = hasMore
